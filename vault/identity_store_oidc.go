@@ -784,6 +784,38 @@ func (i *IdentityStore) roleNamesReferencingTargetKeyName(ctx context.Context, r
 	return names, nil
 }
 
+// TODO: test this with namespaces, race conditions?
+func (i *IdentityStore) listMounts() ([]*MountEntry, error) {
+	secretMounts, err := i.mountLister.ListMounts()
+	if err != nil {
+		return nil, err
+	}
+
+	authMounts, err := i.mountLister.ListAuths()
+	if err != nil {
+		return nil, err
+	}
+
+	return append(authMounts, secretMounts...), nil
+}
+
+// TODO: test this with namespaces, race conditions?
+func (i *IdentityStore) mountsReferencingKey(key string) ([]string, error) {
+	allMounts, err := i.listMounts()
+	if err != nil {
+		return nil, err
+	}
+
+	var mountsWithKey []string
+	for _, mount := range allMounts {
+		if mount.Config.IdentityTokenKey == key {
+			mountsWithKey = append(mountsWithKey, mount.Path)
+		}
+	}
+
+	return mountsWithKey, nil
+}
+
 // handleOIDCDeleteKey is used to delete a key
 func (i *IdentityStore) pathOIDCDeleteKey(ctx context.Context, req *logical.Request, d *framework.FieldData) (*logical.Response, error) {
 	ns, err := namespace.FromContext(ctx)
@@ -822,6 +854,19 @@ func (i *IdentityStore) pathOIDCDeleteKey(ctx context.Context, req *logical.Requ
 	if len(clientNames) > 0 {
 		errorMessage := fmt.Sprintf("unable to delete key %q because it is currently referenced by these clients: %s",
 			targetKeyName, strings.Join(clientNames, ", "))
+		i.oidcLock.Unlock()
+		return logical.ErrorResponse(errorMessage), logical.ErrInvalidRequest
+	}
+
+	mounts, err := i.mountsReferencingKey(targetKeyName)
+	if err != nil {
+		i.oidcLock.Unlock()
+		return nil, err
+	}
+
+	if len(mounts) > 0 {
+		errorMessage := fmt.Sprintf("unable to delete key %q because it is currently referenced by these mounts: %s",
+			targetKeyName, strings.Join(mounts, ", "))
 		i.oidcLock.Unlock()
 		return logical.ErrorResponse(errorMessage), logical.ErrInvalidRequest
 	}
@@ -1026,6 +1071,86 @@ func (i *IdentityStore) pathOIDCGenerateToken(ctx context.Context, req *logical.
 		"ttl":       int64(role.TokenTTL.Seconds()),
 	}
 	return retResp, nil
+}
+
+func (i *IdentityStore) generatePluginIdentityToken(ctx context.Context, storage logical.Storage, me *MountEntry, audience string, ttl time.Duration) (string, time.Duration, error) {
+	if me == nil {
+		i.Logger().Error("unexpected nil mount entry when generating plugin identity token")
+		return "", 0, errors.New("mount entry must not be nil")
+	}
+
+	ns, err := namespace.FromContext(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+
+	key := defaultKeyName
+	if me.Config.IdentityTokenKey != "" {
+		key = me.Config.IdentityTokenKey
+	}
+	if ttl == 0 {
+		ttl = time.Hour
+	}
+	namedKey, err := i.getNamedKey(ctx, storage, key)
+	if err != nil {
+		return "", 0, err
+	}
+	if namedKey == nil {
+		return "", 0, fmt.Errorf("key %q not found", key)
+	}
+
+	// Validate that the role is allowed to sign with its key (the key could have been updated)
+	if !strutil.StrListContains(namedKey.AllowedClientIDs, "*") && !strutil.StrListContains(namedKey.AllowedClientIDs, audience) {
+		return "", 0, fmt.Errorf("the key %q does not list %q as an allowed audience", key, audience)
+	}
+
+	config, err := i.getOIDCConfig(ctx, storage)
+	if err != nil {
+		return "", 0, err
+	}
+
+	// TODO(austin): take into account remainder of current key TTL?
+	if ttl > namedKey.VerificationTTL {
+		ttl = namedKey.VerificationTTL
+	}
+
+	// Tokens for plugins have a distinct issuer from Vault's identity token issuer
+	issuer, err := config.fullIssuer(pluginIdentityTokenIssuer)
+	if err != nil {
+		return "", 0, err
+	}
+
+	now := time.Now()
+	claims := map[string]any{
+		"iss": issuer,
+		// TODO(austin): character set validation and replacement for colons
+		"sub": fmt.Sprintf("plugin-identity:%s:%s:%s", me.namespace.Path, me.Table, me.Accessor),
+		"aud": []string{audience},
+		"nbf": now.Unix(),
+		"iat": now.Unix(),
+		"exp": now.Add(ttl).Unix(),
+		"vaultproject.io": map[string]any{
+			"namespace_id":   ns.ID,
+			"namespace_path": ns.Path,
+			"class":          me.Table,
+			"plugin":         me.Type,
+			"version":        me.RunningVersion,
+			"path":           me.Path,
+			"accessor":       me.Accessor,
+			"local":          me.Local,
+		},
+	}
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", 0, err
+	}
+
+	signedToken, err := namedKey.signPayload(payload)
+	if err != nil {
+		return "", 0, fmt.Errorf("error signing plugin identity token: %w", err)
+	}
+
+	return signedToken, ttl, nil
 }
 
 func (i *IdentityStore) getNamedKey(ctx context.Context, s logical.Storage, name string) (*namedKey, error) {
@@ -1827,6 +1952,26 @@ func (i *IdentityStore) generatePublicJWKS(ctx context.Context, s logical.Storag
 		}
 
 		for _, keyID := range roleKeyIDs {
+			keyIDs[keyID] = struct{}{}
+		}
+	}
+
+	// Also return keys that are associated with a mount
+	mounts, err := i.listMounts()
+	if err != nil {
+		return nil, err
+	}
+	for _, me := range mounts {
+		key := defaultKeyName
+		if me.Config.IdentityTokenKey != "" {
+			key = me.Config.IdentityTokenKey
+		}
+		mountKeyIDs, err := i.keyIDsByName(ctx, s, key)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, keyID := range mountKeyIDs {
 			keyIDs[keyID] = struct{}{}
 		}
 	}

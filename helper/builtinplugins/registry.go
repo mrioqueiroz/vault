@@ -7,7 +7,7 @@ import (
 	"context"
 
 	credAliCloud "github.com/hashicorp/vault-plugin-auth-alicloud"
-	credAzure "github.com/hashicorp/vault-plugin-auth-azure"
+	// credAzure "github.com/hashicorp/vault-plugin-auth-azure"
 	credCentrify "github.com/hashicorp/vault-plugin-auth-centrify"
 	credCF "github.com/hashicorp/vault-plugin-auth-cf"
 	credGcp "github.com/hashicorp/vault-plugin-auth-gcp/plugin"
@@ -23,7 +23,8 @@ import (
 	dbSnowflake "github.com/hashicorp/vault-plugin-database-snowflake"
 	logicalAd "github.com/hashicorp/vault-plugin-secrets-ad/plugin"
 	logicalAlicloud "github.com/hashicorp/vault-plugin-secrets-alicloud"
-	logicalAzure "github.com/hashicorp/vault-plugin-secrets-azure"
+
+	// logicalAzure "github.com/hashicorp/vault-plugin-secrets-azure"
 	logicalGcp "github.com/hashicorp/vault-plugin-secrets-gcp/plugin"
 	logicalGcpKms "github.com/hashicorp/vault-plugin-secrets-gcpkms"
 	logicalKube "github.com/hashicorp/vault-plugin-secrets-kubernetes"
@@ -104,7 +105,7 @@ func newRegistry() *registry {
 			},
 			"approle": {Factory: credAppRole.Factory},
 			"aws":     {Factory: credAws.Factory},
-			"azure":   {Factory: credAzure.Factory},
+			//"azure":   {Factory: credAzure.Factory},
 			"centrify": {
 				Factory:           credCentrify.Factory,
 				DeprecationStatus: consts.Deprecated,
@@ -156,7 +157,7 @@ func newRegistry() *registry {
 			},
 			"alicloud": {Factory: logicalAlicloud.Factory},
 			"aws":      {Factory: logicalAws.Factory},
-			"azure":    {Factory: logicalAzure.Factory},
+			//"azure":    {Factory: logicalAzure.Factory},
 			"cassandra": {
 				Factory:           removedFactory,
 				DeprecationStatus: consts.Removed,
